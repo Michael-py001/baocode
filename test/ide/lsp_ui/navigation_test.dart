@@ -215,7 +215,7 @@ void main() {
   });
 
   testWidgets('F12 centers a definition in a long file', (tester) async {
-    const targetLine = 30;
+    const targetLine = 60;
     final destination = [
       ...List.generate(targetLine, (i) => '// filler $i'),
       'int foo() => 1;',
