@@ -214,6 +214,42 @@ void main() {
     expect(workspace.active!.path, inRoot(_b));
   });
 
+  testWidgets('F12 centers a definition in a long file', (tester) async {
+    const targetLine = 30;
+    final destination = [
+      ...List.generate(targetLine, (i) => '// filler $i'),
+      'int foo() => 1;',
+      'int bar() => 2;',
+    ].join('\n');
+    final files = <String, String>{_a: _files[_a]!, _b: destination};
+    final languages = FakeLanguageFeatures()
+      ..onDefinition = (path, position) => [
+        LspLocation(uriOf(_b), lspRange(targetLine, 4, 7)),
+      ];
+    final workspace = await pumpLanguageWorkbench(
+      tester,
+      files,
+      languages,
+      open: [_a],
+    );
+    final sourceFoo = offsetOf(tester, 'foo');
+    await caretAt(tester, sourceFoo + 1);
+
+    await press(tester, LogicalKeyboardKey.f12);
+    await settle(tester);
+    await settle(tester);
+    expect(workspace.active!.path, inRoot(_b));
+
+    final view = surfaceView(tester);
+    final target = destination.indexOf('foo');
+    final caret = view.caretRectAt(target)!;
+    final area = view.textArea!;
+    expect(
+      caret.top,
+      closeTo(area.top + (area.height - view.lineHeight) / 2, 1),
+    );
+  });
+
   testWidgets('Ctrl/Cmd+click goes to the definition under the pointer and '
       'underlines it as a link while hovering', (tester) async {
     final languages = FakeLanguageFeatures()

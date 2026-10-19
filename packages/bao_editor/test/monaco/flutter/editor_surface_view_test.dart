@@ -675,6 +675,33 @@ void main() {
     await trackpad.panZoomEnd();
   });
 
+  testWidgets('revealRange can center a visible caret', (tester) async {
+    final controller = _controller(
+      List.generate(100, (i) => 'line $i').join('\n'),
+    );
+    await _mount(tester, controller);
+    final surface =
+        tester.state(find.byType(EditorSurface)) as EditorSurfaceView;
+    final area = surface.textArea!;
+    final lineHeight = surface.lineHeight;
+    final targetLine = (area.height / lineHeight).floor() - 2;
+    final target = controller.document.snapshot.lineStarts[targetLine];
+    final before = surface.caretRectAt(target)!;
+    expect(before.bottom, greaterThan(area.bottom - 3 * lineHeight));
+    expect(before.bottom, lessThanOrEqualTo(area.bottom));
+
+    surface.revealRange(target, target + 1);
+    await tester.pump();
+    expect(surface.caretRectAt(target)!.top, closeTo(before.top, 0.01));
+
+    surface.revealRange(target, target + 1, center: true);
+    await tester.pump();
+    expect(
+      surface.caretRectAt(target)!.top,
+      closeTo(area.top + (area.height - surface.lineHeight) / 2, 0.5),
+    );
+  });
+
   testWidgets('drag selection auto-scrolls while outside the viewport', (
     tester,
   ) async {

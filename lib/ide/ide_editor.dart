@@ -554,7 +554,7 @@ class IdeEditorState extends State<IdeEditor> {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         final view = _surfaceKey.currentState;
         if (mounted && view is EditorSurfaceView) {
-          (view as EditorSurfaceView).revealRange(start, end);
+          (view as EditorSurfaceView).revealRange(start, end, center: true);
         }
       });
       WidgetsBinding.instance.scheduleFrame();
