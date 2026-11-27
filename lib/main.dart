@@ -59,6 +59,7 @@ import 'kernel/claude_code/claude_core_setting.dart';
 import 'kernel/claude_code/claude_onboarding.dart';
 import 'kernel/claude_code/claude_path_setting.dart';
 import 'kernel/claude_code/forked_runs.dart';
+import 'kernel/claude_code/guard_client.dart' show GuardConnection;
 import 'kernel/claude_code/process_transport.dart';
 import 'kernel/claude_code/turn_stats_stub.dart'
     if (dart.library.io) 'kernel/claude_code/turn_stats_io.dart'
@@ -182,6 +183,12 @@ Future<void> main(List<String> arguments) async {
   unawaited(reapClaudeProcesses());
   unawaited(reapLspProcesses());
   unawaited(reapPtyProcesses());
+  // The resident guard owns the built-in agent's sessions. Bootstrap on
+  // Windows is SEH-guarded in native main.cpp; here we only attach.
+  if (!kIsWeb) {
+    GuardConnection.configure(DataDirectory.current.path);
+    unawaited(GuardConnection.instance?.connect());
+  }
   AppBinding.ensureInitialized();
   MemoryBudget.apply();
   if (!kIsWeb) {

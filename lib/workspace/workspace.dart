@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:bao_remote/client.dart' show SshServer;
+import 'package:bao_remote/guard.dart' show GuardSessionStatus;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show TextSelection;
 import 'package:path/path.dart' as p;
@@ -17,6 +18,7 @@ import '../icons/icon_library.dart';
 import '../icons/project_icon.dart';
 import '../kernel/agent_kernel.dart';
 import '../kernel/kernel_registry.dart';
+import '../kernel/claude_code/guard_client.dart' show GuardConnection;
 import '../kernel/kernel_types.dart';
 import '../l10n/l10n.dart';
 import '../models/model_providers.dart';
@@ -422,6 +424,9 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
       _ensureIdeChat(folder);
     }
     _restoreChatView();
+    // A conversation that was running when the GUI died lives on in the
+    // guard. Open it so its stream reconnects instead of appearing idle.
+    if (!kIsWeb) unawaited(_restoreGuardSessions());
     if (!_disposed) resumes.resume = _resumeAfterReset;
     if (_selected == null && demo != null) {
       select(demo);
@@ -4162,6 +4167,38 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
       resumes.hit(sessionId: id, resetsAt: at);
     } else if (ran) {
       resumes.remove(id);
+    }
+  }
+
+  /// Reopens conversations the guard still has alive (or interrupted), so a
+  /// GUI that crashed and restarted picks their streams back up instead of
+  /// showing them idle.
+  Future<void> _restoreGuardSessions() async {
+    final client = GuardConnection.instance;
+    if (client == null) return;
+    await client.connect();
+    final List<Map<String, Object?>> live;
+    try {
+      live = await client.listSessions();
+    } on Object {
+      // No guard listening yet: nothing to restore; it may attach later.
+      return;
+    }
+    for (final record in live) {
+      final status = GuardSessionStatus.fromWire('${record['status']}');
+      if (status != GuardSessionStatus.running &&
+          status != GuardSessionStatus.interrupted) {
+        continue;
+      }
+      final id = record['id'];
+      if (id is! String) continue;
+      final thread = _threads
+          .where((thread) => thread.record?.id == id)
+          .firstOrNull;
+      if (thread == null || _disposed) continue;
+      // Selecting opens the session lazily; startClaude routes the built-in
+      // core to the guard, which resumes the same conversation there.
+      select(thread);
     }
   }
 

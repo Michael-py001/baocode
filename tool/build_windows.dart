@@ -245,6 +245,19 @@ Future<void> main(List<String> arguments) async {
   await _putOpenSsh(root, bundle, arch);
   _checkBundle(bundle, [for (final name in _openSshFiles) 'openssh\\$name']);
 
+  // The resident guard owns the built-in agent's sessions in its own
+  // process, so a GUI crash cannot take a running turn down. It is plain
+  // Dart (package:bao_remote), compiled AOT without Flutter.
+  _step('Compiling the resident guard');
+  await _run(Platform.resolvedExecutable, [
+    'compile',
+    'exe',
+    '${root.path}\\packages\\bao_remote\\bin\\bao_guard.dart',
+    '-o',
+    '${bundle.path}\\baocode-guard.exe',
+  ], root.path);
+  _checkBundle(bundle, const ['baocode-guard.exe', 'baocode-spawn.exe']);
+
   _step('Compiling the installer');
   final iscc = _findIscc();
   installers.createSync(recursive: true);

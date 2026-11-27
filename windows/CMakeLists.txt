@@ -64,6 +64,11 @@ add_subdirectory("BrowserBridge")
 # wer/CMakeLists.txt.
 add_subdirectory("wer")
 
+# The SEH-guarded CreateProcessW shim (baocode_spawn.dll) and its self-test;
+# see spawn_shim/CMakeLists.txt. The guard process calls it over FFI so an
+# injected endpoint agent cannot abort it on every spawn.
+add_subdirectory("spawn_shim")
+
 
 # Generated plugin build rules, which manage building the plugins and adding
 # them to the application.
@@ -95,6 +100,10 @@ install(FILES "BrowserBridge/dev.baocode.browser.json"
 
 # The module that writes down a fast fail, beside the app that registers it.
 install(TARGETS baocode_wer RUNTIME
+  DESTINATION "${CMAKE_INSTALL_PREFIX}" COMPONENT Runtime)
+
+# The SEH-guarded spawn shim, beside the guard that loads it over FFI.
+install(TARGETS baocode_spawn RUNTIME
   DESTINATION "${CMAKE_INSTALL_PREFIX}" COMPONENT Runtime)
 
 install(FILES "${FLUTTER_ICU_DATA_FILE}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"

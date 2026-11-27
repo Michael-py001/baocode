@@ -13,8 +13,37 @@
 #include "hang_watchdog.h"
 #include "open_requests.h"
 #include "utils.h"
+#include "../spawn_shim/spawn_shim.h"
 
 namespace {
+
+// Starts the resident guard before any Flutter code runs. Going through the
+// SEH shim matters: an injected endpoint agent hooks CreateProcessW and can
+// throw a C++ exception from it, which would otherwise unwind into this
+// frame and abort the app (see issue #1). The guard owns the built-in agent's
+// sessions so a GUI crash cannot take them down.
+void StartGuard() {
+  wchar_t executable[MAX_PATH] = {};
+  const DWORD length = ::GetModuleFileNameW(nullptr, executable, MAX_PATH);
+  if (length == 0 || length >= MAX_PATH) return;
+  std::wstring path = executable;
+  path = path.substr(0, path.find_last_of(L'\\') + 1) + L"baocode-guard.exe";
+  if (::GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return;
+
+  std::wstring command = L"\"" + path + L"\"";
+  std::vector<wchar_t> mutable_command(command.begin(), command.end());
+  mutable_command.push_back(L'\0');
+  STARTUPINFOW info = {};
+  info.cb = sizeof(info);
+  PROCESS_INFORMATION process = {};
+  // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: the guard outlives this
+  // process; the shim catches a hook exception instead of letting it abort.
+  spawn_seh(nullptr, mutable_command.data(), nullptr, nullptr, FALSE,
+            DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP, nullptr, nullptr,
+            &info, sizeof(info), nullptr, &process);
+  if (process.hProcess != nullptr) ::CloseHandle(process.hProcess);
+  if (process.hThread != nullptr) ::CloseHandle(process.hThread);
+}
 
 // Matches MainFlutterWindow.swift: wider than the 720 at which the sidebar
 // docks beside the chat, and tall enough for the title bar and the composer.
@@ -112,6 +141,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   // plugins, and for the folder picker and clipboard imaging; through OLE,
   // which the files dragged onto the window need as well (RegisterDragDrop).
   ::OleInitialize(nullptr);
+
+  // Bring up the guard before any Dart code can ask for a child process.
+  // Its own CreateProcessW is SEH-guarded, so the injected DLL cannot abort
+  // this process here.
+  StartGuard();
 
   flutter::DartProject project(L"data");
   // Drawn by Skia, as on macOS (FLTEnableImpeller), not Impeller, Flutter's
