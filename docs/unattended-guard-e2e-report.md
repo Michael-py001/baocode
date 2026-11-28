@@ -35,6 +35,15 @@
 
 **结论**：GUI 能被强杀且 guard/spawn 不受影响；用同一目录能正常重启且无新 fast fail。因自动化条件无法在 GUI 里持续驱动一个有真实模型的长会话，"对话在 GUI 里连续进行"只能由层1的会话状态证据（会话在、状态 running、消息不丢不重）间接证明；`sessionOpen` 现状会在重开时 close 旧 engine 再新建，属于"续跑但不无缝"。
 
+### 关于"重启后 guard 消失"的更正（受控实验）
+
+另一个实测对话记录过"GUI 重启后 guard 在第 1 秒消失"，一度怀疑是 `StartGuard()` 的 `AlreadyServing` 竞态。两次受控实验否定了这个猜想：
+
+1. 直接连开两个 `baocode-guard.exe` 指向同一 dataDir：第二个因 `AlreadyServing` 退出，**旧 guard 始终存活**。
+2. 精确计时：启动 GUI → 5 秒后强杀 → 1 秒后重启（全程 < 2 分钟 grace）：旧 guard（PID 48904）在崩溃后、重启后都存活，`guard.port` 保留。
+
+所以"重启后 guard 消失"是**观测跨度超过 `firstWait`（2 分钟）后 guard 空闲退出**（`guard_daemon.dart:78,84` 的 grace timer），不是重启把 guard 杀掉。真实有会话时 `_onLink(up)` 会取消 grace timer（`guard_daemon.dart:70-73`），guard 会持续存活。无活跃会话时按设计退出，符合预期。
+
 ## 能力边界（最终结论）
 
 - **能做到**：GUI 闪退时 agent 会话在独立 guard 进程内继续；重开 GUI 能连回原会话、状态可读、输出可从断点重放；有完整崩溃报告（WER + hang watchdog 取证）。
