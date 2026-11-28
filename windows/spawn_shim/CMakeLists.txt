@@ -9,7 +9,8 @@ add_library(baocode_spawn SHARED
 )
 apply_standard_settings(baocode_spawn)
 target_compile_options(baocode_spawn PRIVATE /utf-8)
-target_compile_definitions(baocode_spawn PRIVATE "NOMINMAX")
+target_compile_definitions(baocode_spawn PRIVATE "NOMINMAX"
+  "BAOCODE_SPAWN_SHIM_BUILD")
 
 # The guard is a plain process; carry the VC++ runtime beside the DLL rather
 # than depend on a system copy that may be older (same as baocode_wer).

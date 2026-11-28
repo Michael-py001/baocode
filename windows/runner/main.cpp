@@ -36,11 +36,14 @@ void StartGuard() {
   STARTUPINFOW info = {};
   info.cb = sizeof(info);
   PROCESS_INFORMATION process = {};
-  // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: the guard outlives this
-  // process; the shim catches a hook exception instead of letting it abort.
+  // CREATE_NO_WINDOW, not DETACHED_PROCESS: a detached Dart process has no
+  // valid std handles and exits 255 on its first stderr write. This way the
+  // child gets normal handles, no console flash, and still outlives the app
+  // (Windows does not kill children when their parent exits). The shim
+  // catches a hook exception instead of letting it abort this process.
   spawn_seh(nullptr, mutable_command.data(), nullptr, nullptr, FALSE,
-            DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP, nullptr, nullptr,
-            &info, sizeof(info), nullptr, &process);
+            CREATE_NO_WINDOW, nullptr, nullptr, &info, sizeof(info), nullptr,
+            &process);
   if (process.hProcess != nullptr) ::CloseHandle(process.hProcess);
   if (process.hThread != nullptr) ::CloseHandle(process.hThread);
 }
