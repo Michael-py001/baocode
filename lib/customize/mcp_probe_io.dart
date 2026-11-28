@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import '../kernel/claude_code/claude_environment.dart';
+import '../kernel/claude_code/claude_haiku_io.dart' show startGuardedProcess;
 import 'mcp_probe.dart';
 
 McpProber? get platformMcpProber => probeMcpServer;
@@ -89,7 +90,7 @@ Future<McpProbeResult> _probeCommand(
 }) async {
   final Process process;
   try {
-    process = await Process.start(
+    process = await startGuardedProcess(
       command,
       args,
       environment: environment,

@@ -6,6 +6,7 @@ import 'package:bao_remote/local.dart' show ClaudeEnvironment;
 import 'package:path/path.dart' as p;
 
 import '../ide/file_service_io.dart';
+import '../kernel/claude_code/claude_haiku_io.dart' show startGuardedProcess;
 import '../kernel/claude_code/claude_sdk_tools.dart';
 import '../kernel/kernel_types.dart';
 import '../l10n/app_localizations.dart';
@@ -242,7 +243,7 @@ abstract final class LocalTools {
         : await ClaudeEnvironment.of();
     final Process process;
     if (Platform.isWindows) {
-      process = await Process.start(
+      process = await startGuardedProcess(
         windowsPowerShell,
         [
           '-NoProfile',

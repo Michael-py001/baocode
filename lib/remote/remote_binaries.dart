@@ -7,6 +7,7 @@ import 'package:bao_remote/local.dart' show ClaudeEnvironment;
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:path/path.dart' as p;
 
+import '../kernel/claude_code/guard_process.dart' show runGuarded;
 import '../platform/data_dir.dart';
 import 'host_server_platform.dart'
     if (dart.library.ffi) 'host_server_platform_ffi.dart';
@@ -376,7 +377,7 @@ class SourceServerBinaries implements RemoteServerBinaries {
     );
     if (!out.existsSync()) {
       out.parent.createSync(recursive: true);
-      final result = await Process.run(
+      final result = await runGuarded(
         _dart,
         [
           'compile',
@@ -392,13 +393,15 @@ class SourceServerBinaries implements RemoteServerBinaries {
         ],
         workingDirectory: root,
         environment: _environment,
+        includeParentEnvironment: true,
+        timeout: const Duration(minutes: 5),
       );
       if (result.exitCode != 0) {
         _built.remove(platform);
         throw SshConnectException(
           SshFailure.server,
           'The BaoCode server could not be built for $name',
-          detail: '${result.stdout}\n${result.stderr}'.trim(),
+          detail: '${utf8.decode(result.stdout)}\n${result.stderr}'.trim(),
         );
       }
     }

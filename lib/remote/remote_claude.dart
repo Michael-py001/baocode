@@ -20,6 +20,8 @@ import '../kernel/claude_code/claude_haiku.dart';
 import '../kernel/claude_code/claude_storage_io.dart';
 import '../kernel/antigravity/agy_transport.dart';
 import '../kernel/claude_code/dart_core_transport.dart';
+import '../kernel/claude_code/guard_client.dart' show GuardConnection;
+import '../kernel/claude_code/guard_transport.dart' show GuardTransport;
 import '../kernel/claude_code/process_transport.dart';
 import '../models/launch_environment.dart';
 import 'remote_claude_install.dart';
@@ -33,6 +35,16 @@ import 'port_forwards.dart';
 const remoteClaudeInstallCommand =
     'curl -fsSL https://claude.ai/install.sh | bash';
 
+/// Runs the built-in core in the resident guard instead of an isolate in the
+/// GUI, so the session survives a GUI crash. Falls back to the in-process
+/// core when the guard has not been configured (tests, early startup).
+Future<ClaudeCodeTransport> startBuiltin(ClaudeLaunch launch) async {
+  final client = GuardConnection.instance;
+  if (client == null) return startDartCore(launch);
+  await client.connect();
+  return GuardTransport.start(client, launch);
+}
+
 /// Claude Code where [launch]'s project is: on its host for a remote one.
 /// BaoCode's own core only on an upstream's model ([ClaudeLaunch.env]):
 /// never on what the machine's Claude Code setup names; always on one
@@ -41,13 +53,13 @@ Future<ClaudeCodeTransport> startClaude(ClaudeLaunch launch) async {
   final host = RemoteLocation.hostOf(launch.cwd);
   if (host == null) {
     if (launch.agy) return startAgy(launch);
-    if (launch.builtinCore && launch.env != null) return startDartCore(launch);
+    if (launch.builtinCore && launch.env != null) return startBuiltin(launch);
     // On this machine: BaoCode's own core, unless the CLI is picked.
     return switch (ClaudeCore.current()) {
       ClaudeCore.builtin when launch.env == null => throw const ClaudeNoModel(
         ClaudeCore.noModel,
       ),
-      ClaudeCore.builtin => startDartCore(launch),
+      ClaudeCore.builtin => startBuiltin(launch),
       ClaudeCore.cli => startClaudeProcess(launch),
     };
   }

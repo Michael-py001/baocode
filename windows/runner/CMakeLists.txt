@@ -27,6 +27,7 @@ add_executable(${BINARY_NAME} WIN32
   "view_window.cpp"
   "win32_window.cpp"
   "window_channel.cpp"
+  "../spawn_shim/spawn_shim.cpp"
   "${FLUTTER_MANAGED_DIR}/generated_plugin_registrant.cc"
   "Runner.rc"
   "runner.exe.manifest"
@@ -41,6 +42,9 @@ apply_standard_settings(${BINARY_NAME})
 target_compile_options(${BINARY_NAME} PRIVATE /utf-8)
 
 # Add preprocessor definitions for the build version.
+# The spawn shim is compiled into the runner itself (bootstrap must not depend
+# on a DLL import); it declares its symbols locally, not as dllimport.
+target_compile_definitions(${BINARY_NAME} PRIVATE "BAOCODE_SPAWN_SHIM_LOCAL")
 target_compile_definitions(${BINARY_NAME} PRIVATE "FLUTTER_VERSION=\"${FLUTTER_VERSION}\"")
 target_compile_definitions(${BINARY_NAME} PRIVATE "FLUTTER_VERSION_MAJOR=${FLUTTER_VERSION_MAJOR}")
 target_compile_definitions(${BINARY_NAME} PRIVATE "FLUTTER_VERSION_MINOR=${FLUTTER_VERSION_MINOR}")

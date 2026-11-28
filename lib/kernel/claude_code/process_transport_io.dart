@@ -14,6 +14,7 @@ import '../../platform/child_process_registry.dart';
 import 'claude_code_transport.dart';
 import 'claude_environment.dart';
 import 'claude_settings_file.dart';
+import 'guard_client.dart' show GuardConnection;
 import 'local_claude_io.dart';
 
 /// Claude Code as a child process, over its stdin and stdout.
@@ -140,30 +141,46 @@ class ProcessTransport implements ClaudeCodeTransport {
     // The machine's own certificates, as the app's requests trust them:
     // Node bundles Mozilla's roots alone.
     final certificates = await nodeCertificatesEnvironment(cli.environment);
+    final environment = {
+      ...cli.environment,
+      ...proxy,
+      ...certificates,
+      ...bash,
+      // A provider's session: none of the user's own model setup.
+      if (launch.env != null)
+        for (final name in ClaudeModelVariables.inherited) name: '',
+      ...ClaudeLaunch.environment,
+      ...ClaudeEntrypoint.of(launch.env, cli.environment),
+      ...ClaudeEnvironment.stateDirectory(cli.environment),
+    };
+    // The login shell's environment is the whole of it; on Windows it is
+    // the app's own, and the child needs the parent's beside it for what
+    // `cmd.exe` itself runs on (COMSPEC, PATHEXT, …). An npm shim is a
+    // `.cmd`, which only the shell can run.
+    final includeParent = Platform.isWindows;
+    final runInShell = cli.throughShell;
     try {
-      final process = await Process.start(
-        cli.executable,
-        started.arguments,
-        workingDirectory: launch.cwd,
-        environment: {
-          ...cli.environment,
-          ...proxy,
-          ...certificates,
-          ...bash,
-          // A provider's session: none of the user's own model setup.
-          if (launch.env != null)
-            for (final name in ClaudeModelVariables.inherited) name: '',
-          ...ClaudeLaunch.environment,
-          ...ClaudeEntrypoint.of(launch.env, cli.environment),
-          ...ClaudeEnvironment.stateDirectory(cli.environment),
-        },
-        // The login shell's environment is the whole of it; on Windows it
-        // is the app's own, and the child needs the parent's beside it for
-        // what `cmd.exe` itself runs on (COMSPEC, PATHEXT, …).
-        includeParentEnvironment: Platform.isWindows,
-        // An npm shim is a `.cmd`, which only the shell can run.
-        runInShell: cli.throughShell,
-      );
+      final client = GuardConnection.instance;
+      final dynamic process;
+      if (client != null && await client.isAvailable()) {
+        process = await client.startProcess(
+          executable: cli.executable,
+          arguments: started.arguments,
+          workingDirectory: launch.cwd,
+          environment: environment,
+          includeParentEnvironment: includeParent,
+          runInShell: runInShell,
+        );
+      } else {
+        process = await Process.start(
+          cli.executable,
+          started.arguments,
+          workingDirectory: launch.cwd,
+          environment: environment,
+          includeParentEnvironment: includeParent,
+          runInShell: runInShell,
+        );
+      }
       // Read as it starts; gone with it.
       unawaited(process.exitCode.then((_) => deleteFiles()));
       return ProcessTransport._(process, executable: cli.executable);
@@ -189,7 +206,9 @@ class ProcessTransport implements ClaudeCodeTransport {
     return value == null || value.isEmpty ? null : setting;
   }
 
-  final Process _process;
+  /// A dart:io Process, or a GuardProcess when the spawn went through the
+  /// guard. Both expose pid/stdout/stderr/stdin/exitCode/kill/close.
+  final dynamic _process;
 
   /// The CLI run, to name in a report of its failing.
   final String? executable;

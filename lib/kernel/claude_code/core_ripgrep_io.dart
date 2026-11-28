@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:bao_agent/bao_agent.dart' show FileIndex;
@@ -5,6 +6,7 @@ import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
 import 'package:path/path.dart' as p;
 
 import '../../platform/data_dir.dart';
+import 'guard_process.dart' show runGuarded;
 import 'local_claude_io.dart';
 
 /// ripgrep for BaoCode's own core where the machine has none (#883): as
@@ -55,12 +57,16 @@ abstract final class CoreRipgrep {
       // A native build: not a script, nor npm's, that has no ripgrep in it
       // and would be run as Claude Code.
       if (!_native(executable)) throw const FormatException('not native');
-      final result = await Process.run(
+      final result = await runGuarded(
         executable,
         const ['--version'],
         environment: const {'ARGV0': 'rg'},
-      ).timeout(const Duration(seconds: 10));
-      answer = result.exitCode == 0 && '${result.stdout}'.startsWith('ripgrep');
+        includeParentEnvironment: true,
+        timeout: const Duration(seconds: 10),
+      );
+      answer =
+          result.exitCode == 0 &&
+          utf8.decode(result.stdout).startsWith('ripgrep');
     } on Object {
       answer = false;
     }

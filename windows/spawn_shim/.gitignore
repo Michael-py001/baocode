@@ -1,0 +1,8 @@
+# Build outputs of the shim and its self-test (compiled with MSVC locally).
+*.dll
+*.exe
+*.lib
+*.exp
+*.obj
+*.pdb
+*.ilk

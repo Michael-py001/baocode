@@ -133,19 +133,48 @@ final class WindowsPty extends Pty {
           ..cb = sizeOf<_StartupInfoEx>()
           ..dwFlags = _startfUseStdHandles
           ..lpAttributeList = list;
-        created = _createProcess(
-          nullptr,
-          heap.utf16(windowsCommandLine(executable, launch.arguments)),
-          nullptr,
-          nullptr,
-          0,
-          _extendedStartupInfoPresent | _createUnicodeEnvironment,
-          heap.utf16(windowsEnvironmentBlock(environment)).cast(),
-          heap.utf16(cwd),
-          startup,
-          info,
+        final commandLine = heap.utf16(
+          windowsCommandLine(executable, launch.arguments),
         );
-        lastError = _getLastError();
+        final Pointer<Uint16> envBlock = heap
+            .utf16(windowsEnvironmentBlock(environment))
+            .cast();
+        final directory = heap.utf16(cwd);
+        final flags = _extendedStartupInfoPresent | _createUnicodeEnvironment;
+        final shim = _spawnSeh;
+        if (shim != null) {
+          // spawn_seh returns 0 on success, else a Win32 error (or 5 when an
+          // injected DLL threw inside CreateProcessW).
+          lastError = shim(
+            nullptr,
+            commandLine,
+            nullptr,
+            nullptr,
+            0,
+            flags,
+            envBlock.cast(),
+            directory,
+            startup.cast(),
+            sizeOf<_StartupInfoEx>(),
+            list,
+            info,
+          );
+          created = lastError == 0 ? 1 : 0;
+        } else {
+          created = _createProcess(
+            nullptr,
+            commandLine,
+            nullptr,
+            nullptr,
+            0,
+            flags,
+            envBlock.cast(),
+            directory,
+            startup,
+            info,
+          );
+          lastError = _getLastError();
+        }
       } finally {
         _deleteProcThreadAttributeList(list);
       }
@@ -860,6 +889,53 @@ final _createProcess = _kernel32
         Pointer<_ProcessInformation>,
       )
     >('CreateProcessW');
+
+/// The SEH-guarded CreateProcessW from baocode_spawn.dll, when it is beside
+/// the executable. Endpoint software that hooks CreateProcessW can throw a
+/// C++ exception from inside it; the shim catches it so the GUI does not
+/// abort. Without the DLL we fall back to the plain call above.
+final _SpawnSehFn? _spawnSeh = _loadSpawnSeh();
+
+_SpawnSehFn? _loadSpawnSeh() {
+  try {
+    final dir = File(Platform.resolvedExecutable).parent.path;
+    final library = DynamicLibrary.open(
+      '$dir${Platform.pathSeparator}baocode_spawn.dll',
+    );
+    return library.lookupFunction<_SpawnSehNative, _SpawnSehFn>('spawn_seh');
+  } on Object {
+    return null;
+  }
+}
+
+typedef _SpawnSehNative = Uint32 Function(
+  Pointer<Uint16>,
+  Pointer<Uint16>,
+  Pointer<Void>,
+  Pointer<Void>,
+  Int32,
+  Uint32,
+  Pointer<Void>,
+  Pointer<Uint16>,
+  Pointer<Void>,
+  Uint32,
+  Pointer<Void>,
+  Pointer<_ProcessInformation>,
+);
+typedef _SpawnSehFn = int Function(
+  Pointer<Uint16>,
+  Pointer<Uint16>,
+  Pointer<Void>,
+  Pointer<Void>,
+  int,
+  int,
+  Pointer<Void>,
+  Pointer<Uint16>,
+  Pointer<Void>,
+  int,
+  Pointer<Void>,
+  Pointer<_ProcessInformation>,
+);
 
 final _readFile = _kernel32
     .lookupFunction<

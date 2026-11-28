@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:crypto/crypto.dart' show sha256;
 
+import '../kernel/claude_code/guard_process.dart' show runGuarded;
 import 'forge_address.dart';
 import 'forge_api.dart';
 
@@ -124,14 +125,18 @@ class IoForgeHttp implements ForgeHttp, ForgeCertificateTrust {
 /// first; none for none (or no Git).
 Future<List<String>> gitRemoteUrls(String folder) async {
   try {
-    final result = await Process.run('git', [
-      'config',
-      '--get-regexp',
-      r'^remote\..*\.url$',
-    ], workingDirectory: folder).timeout(const Duration(seconds: 5));
+    final result = await runGuarded(
+      'git',
+      ['config', '--get-regexp', r'^remote\..*\.url$'],
+      workingDirectory: folder,
+      includeParentEnvironment: true,
+      timeout: const Duration(seconds: 5),
+    );
     if (result.exitCode != 0) return const [];
     final remotes = <(String, String)>[
-      for (final line in const LineSplitter().convert('${result.stdout}'))
+      for (final line in const LineSplitter().convert(
+        utf8.decode(result.stdout),
+      ))
         if (RegExp(r'^remote\.(.+)\.url\s+(.+)$').firstMatch(line)
             case final match?)
           (match[1]!, match[2]!.trim()),

@@ -21,6 +21,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../common/debug_types.dart';
+import '../../kernel/claude_code/claude_haiku_io.dart' show startGuardedProcess;
 import 'dap_framing.dart';
 import 'debug_adapter.dart';
 
@@ -53,7 +54,7 @@ final class StdioDebugAdapterTransport extends EmitterDebugAdapterTransport {
   Future<void> start() async {
     final Process process;
     try {
-      process = await Process.start(
+      process = await startGuardedProcess(
         executable,
         arguments,
         workingDirectory: workingDirectory,
