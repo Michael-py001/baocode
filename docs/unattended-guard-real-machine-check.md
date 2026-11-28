@@ -18,7 +18,21 @@
 - 但本机实际崩溃栈是 GPU 线程，**本方案不覆盖该路径**。若 abort 的真正原因不是 CreateProcessW 钩子，本方案不能消除这些崩溃。这一点必须诚实标注，不能声称"已修复闪退"。
 - 真机复现完整崩溃条件（特定入参触发钩子抛异常）不可控，无法用"跑一次不崩"证明修复；能用证据只有模块注入枚举 + SEH 自测 + 全链路 RPC 集成测试。
 
+## 新构建实测（2026-11-28）
+
+用 `flutter build windows --release` + 单独编译 `baocode-guard.exe` 放进 Release 目录，以隔离数据目录 + `BAOCODE_PERF_SCENARIOS=1` 启动第二个实例（不碰用户现有窗口）：
+
+1. **启动**：app 起来后 `baocode-guard.exe` 与 `baocode-spawn.exe` 均存活，`guard.port` / `spawn.port` 建好。
+2. **模拟 GUI 崩溃**：`taskkill /F` 强杀 app 进程后，guard 与 spawn **都存活**，guard 端口仍在。
+3. **进程创建**：干净的启动里，guard/spawn 从 1 秒起稳定存活；通过 guard 的 `process/run` RPC 起 `cmd.exe /c exit 7` 拿到真实 pid、stdout、退出码（自动化测试 PASS）。
+4. **grace 行为**：没有会话连接时，guard 在 `firstWait`（2 分钟）后干净退出并删除 `guard.port`；这是设计行为。有活跃会话时 `_onLink(up)` 会取消该计时器。测试中没有真实会话，故观察到的是"空闲退出"，不是崩溃。
+
+### 过程中发现并修复的两个真实 bug
+
+- CMake 编译 `baocode_spawn.dll` 时未定义 `BAOCODE_SPAWN_SHIM_BUILD`，导出宏不一致导致 `C4273` 被 `/WX` 当错误 → Release 构建失败。已修。
+- `StartGuard()` 用 `DETACHED_PROCESS` 起 Dart guard，进程无有效 std 句柄，首次 `stderr.writeln` 即以 255 退出。用 GUI 子系统探针复现并验证：改 `CREATE_NO_WINDOW` 后 guard 存活（STILL_ACTIVE）。已修。
+
 ## 待办
 
-- 用新构建的 baocode.exe（含本方案）在这台机器上实际运行一段时间，观察 `events.log` 是否还出现 `fast fail 7`；这是唯一的最终判据。
+- 让新构建在这台机器上日常使用一段时间，观察 `events.log` 是否还出现 `fast fail 7`；这是判断方案是否真正消除闪退的最终判据。
 - 若仍出现 GPU 线程 abort，需回到根因分析（显卡驱动 `igd10um64xe` 也在崩溃栈中出现），与本方案无关。
