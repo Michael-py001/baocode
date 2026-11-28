@@ -33,7 +33,10 @@ class GuardSession {
   }
 
   final EngineOptions options;
-  final void Function(Map<String, Object?> message) send;
+
+  /// Where this session's engine output goes. Mutable so a reconnected GUI
+  /// can reattach without rebuilding the engine.
+  void Function(Map<String, Object?> message) send;
   final GuardRegistry registry;
   final void Function(String message) log;
   final String sessionId;
@@ -162,6 +165,17 @@ class GuardSession {
     for (final entry in _pendingRequests.entries) {
       send({...entry.value.message, 'sessionId': sessionId});
     }
+  }
+
+  /// The GUI reconnected: route this session's engine output to the new
+  /// connection and replay permission questions asked while it was away.
+  /// Returns true when a live engine was reattached, false when the caller
+  /// must create a fresh session (no engine, or closed).
+  bool reattach(void Function(Map<String, Object?> message) newSend) {
+    if (_closed || _engine == null) return false;
+    send = newSend;
+    replayPending();
+    return true;
   }
 
   /// Feeds a stream-json message from the app to the engine.

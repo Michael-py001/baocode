@@ -11,5 +11,5 @@
 
 - 层1 PASS：会话断连后仍在、状态 running、重连收到 3 条缓存消息（exactly-once）
 - 层2：GUI 强杀后 guard（32140）/spawn（123244）存活；sessions.json 保留 3 个会话；重启 app（12124）正常，无新 fast fail 7
-- 连续性边界：sessionOpen 现状 close 旧 engine 再新建 → 续跑但不无缝；未改运行时代码（按用户决定）
+- 连续性已升级：sessionOpen 复用 engine + reattach 输出（reused:true、interrupted:false），集成测试 PASS；不再 close/rebuild
 - 隔离目录与真实 settings/secrets 副本已删除；用户现有两个 BaoCode 进程未受影响

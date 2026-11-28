@@ -143,6 +143,11 @@ class GuardDaemon {
     );
   }
 
+  /// A session's engine output goes to the app as a notification. Kept as a
+  /// factory so reattach can swap in the same closure for a new connection.
+  void Function(Map<String, Object?> message) get _sessionSend =>
+      (message) => peer.notify(GuardProtocol.sessionMessage, message);
+
   void _registerHandlers() {
     peer.handlers[GuardProtocol.sessionOpen] = (params, call) async {
       final map = _asMap(params);
@@ -154,15 +159,20 @@ class GuardDaemon {
       }
       final options = EngineOptions.fromJson(optionsJson);
       final id = options.sessionId ?? options.resume ?? '';
-      await _sessions[id]?.close();
+      // A reconnecting GUI must reuse the live engine, not close and rebuild
+      // it: that would interrupt the running turn and lose in-memory state.
+      final existing = _sessions[id];
+      if (existing != null && existing.reattach(_sessionSend)) {
+        return {'id': id, 'reused': true};
+      }
       final session = GuardSession(
         options: options,
-        send: (message) => peer.notify(GuardProtocol.sessionMessage, message),
+        send: _sessionSend,
         registry: registry,
         log: log,
       );
       _sessions[id] = session;
-      return {'id': id};
+      return {'id': id, 'reused': false};
     };
 
     peer.handlers[GuardProtocol.sessionSend] = (params, call) async {

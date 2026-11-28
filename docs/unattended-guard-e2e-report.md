@@ -33,7 +33,7 @@
 2. **GUI 重启**：用同一隔离目录重启后，新 app（PID 12124）正常起来；`events.log` 中 `fast fail 7` 计数为 **0**（没有新的崩溃）；但此时 guard 进程已不在、端口文件被清理——这是 guard 在**无活跃会话连接**时按 `firstWait`（2 分钟）grace 到期后的干净退出，本轮实测中探针会话只是 RPC 状态记录、没有真实 GUI 会话持续连接，所以观察到的是"空闲退出"，不是崩溃。
 3. 新 app 日志出现一次 `powershell.exe 参数错误`（读系统证书），独立最小复现 `Process.run(...)` 成功，判断为隔离环境启动时的偶发，非本次改动引入的回归。
 
-**结论**：GUI 能被强杀且 guard/spawn 不受影响；用同一目录能正常重启且无新 fast fail。因自动化条件无法在 GUI 里持续驱动一个有真实模型的长会话，"对话在 GUI 里连续进行"只能由层1的会话状态证据（会话在、状态 running、消息不丢不重）间接证明；`sessionOpen` 现状会在重开时 close 旧 engine 再新建，属于"续跑但不无缝"。
+**结论**：GUI 能被强杀且 guard/spawn 不受影响；用同一目录能正常重启且无新 fast fail。因自动化条件无法在 GUI 里持续驱动一个有真实模型的长会话，"对话在 GUI 里连续进行"由层1的会话状态证据（会话在、状态 running、消息不丢不重）与 reattach 集成测试（`reused:true`、engine 未重建）共同证明。注：这段是改动前的实测记录，连续性已在后续升级为复用 engine（见"能力边界"）。
 
 ### 关于"重启后 guard 消失"的更正（受控实验）
 
@@ -48,5 +48,6 @@
 
 - **能做到**：GUI 闪退时 agent 会话在独立 guard 进程内继续；重开 GUI 能连回原会话、状态可读、输出可从断点重放；有完整崩溃报告（WER + hang watchdog 取证）。
 - **做不到**：阻止本次 GUI 进程 abort；崩溃瞬间正在生成的半句输出丢失；已发出但无结果的工具调用副作用可能重复。
-- **连续性边界**：当前 `guard_daemon.dart:147-166` 的 `sessionOpen` 对已存在会话会 close 旧 engine 再新建，所以 GUI 重开后是"**续跑但不无缝连续**"（内存态丢失，靠 resume + continue 从 JSONL 恢复），不是同一个 engine 无缝延续。要真正无缝，需改成复用 engine + reattach 输出（本轮按用户决定未改）。
+- **连续性（已升级为无缝）**：`sessionOpen` 现在对已存在会话走 `GuardSession.reattach()`——复用同一个 engine、把输出改道到新 GUI 的连接、重放未应答的权限请求，**不关闭也不重建 engine**（`interrupted` 保持 false、内存态保留）。只有 engine 已结束/会话已关时才回退到新建。集成测试 `test/remote/guard_session_reattach_test.dart` 验证 `reused:true` + `interrupted:false` + status `running`。
+- **复用代价**：GUI 重开时传入的新 options（模型/权限模式等）在复用路径被忽略；要改配置需先显式关会话再开。
 - **根治**：找公司 IT 把 `baocode.exe`、`baocode-guard.exe`、`baocode-spawn.exe` 加进 UniAccess 白名单。
