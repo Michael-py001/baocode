@@ -44,6 +44,10 @@ abstract final class GuardProtocol {
   /// then `pty/output` and `pty/exit`.
   static const ptyStart = 'pty/start';
 
+  /// Starts a child that outlives the app: same spawn params; answers
+  /// `{pid}` as soon as the child exists, without waiting for its exit.
+  static const processDetached = 'process/detached';
+
   /// Writes bytes to a child's stdin: `{id, data(base64), close}`.
   static const processStdin = 'process/stdin';
 

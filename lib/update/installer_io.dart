@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:ffi' show Abi;
 import 'dart:io';
 
@@ -5,6 +6,8 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 import '../channel/channel_setup.dart' show ChannelSetup;
+import '../kernel/claude_code/guard_client.dart' show GuardConnection;
+import '../kernel/claude_code/guard_process.dart' show runGuarded;
 import 'update_io.dart';
 import 'update_manifest.dart';
 import 'update_service.dart';
@@ -131,12 +134,36 @@ class IoUpdateProcesses implements UpdateProcesses {
   const IoUpdateProcesses();
 
   @override
-  Future<ProcessResult> run(String executable, List<String> arguments) =>
-      Process.run(executable, arguments);
+  Future<ProcessResult> run(String executable, List<String> arguments) async {
+    final result = await runGuarded(
+      executable,
+      arguments,
+      includeParentEnvironment: true,
+      // An install runs slow commands (codesign --deep on a large bundle).
+      timeout: const Duration(minutes: 2),
+    );
+    return ProcessResult(
+      result.pid,
+      result.exitCode,
+      utf8.decode(result.stdout),
+      result.stderr,
+    );
+  }
 
   @override
-  Future<void> startDetached(String executable, List<String> arguments) =>
-      Process.start(executable, arguments, mode: ProcessStartMode.detached);
+  Future<void> startDetached(String executable, List<String> arguments) async {
+    final client = GuardConnection.instance;
+    if (client != null && await client.isAvailable()) {
+      try {
+        if (await client.startDetachedProcess(executable, arguments) > 0) {
+          return;
+        }
+      } on Object {
+        // The guard went away: fall through to a local start.
+      }
+    }
+    await Process.start(executable, arguments, mode: ProcessStartMode.detached);
+  }
 }
 
 // --- Windows -----------------------------------------------------------------

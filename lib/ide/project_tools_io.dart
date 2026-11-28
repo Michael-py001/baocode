@@ -5,6 +5,8 @@ import 'dart:typed_data';
 
 import 'package:path/path.dart' as p;
 
+import '../kernel/claude_code/guard_process.dart'
+    show GuardRunResult, runGuarded;
 import 'project_tools.dart';
 
 class LocalIdeProjectTools implements IdeProjectTools {
@@ -225,13 +227,13 @@ class LocalIdeProjectTools implements IdeProjectTools {
         '${end < line.length ? '…' : ''}';
   }
 
-  Future<ProcessResult> _git(List<String> arguments) async {
+  Future<GuardRunResult> _git(List<String> arguments) async {
     try {
       // No shell interpolation or optional index refresh writes (the
       // variable, not `--no-optional-locks`, which Gits before 2.15 do not
       // know). Disable a configured fsmonitor hook, which need not itself be
       // read-only.
-      return await Process.run(
+      return await runGuarded(
         'git',
         ['-c', 'core.fsmonitor=false', ...arguments],
         workingDirectory: root,
@@ -239,9 +241,10 @@ class LocalIdeProjectTools implements IdeProjectTools {
           'GIT_TERMINAL_PROMPT': '0',
           'GIT_OPTIONAL_LOCKS': '0',
         },
-        stdoutEncoding: utf8,
+        includeParentEnvironment: true,
         stderrEncoding: utf8,
-      ).timeout(const Duration(seconds: 15));
+        timeout: const Duration(seconds: 15),
+      );
     } on ProcessException catch (error) {
       throw IdeProjectToolsException(
         'Git is not installed or could not be started: ${error.message}',
@@ -257,14 +260,14 @@ class LocalIdeProjectTools implements IdeProjectTools {
     }
   }
 
-  static String _stdoutLine(ProcessResult result) {
-    final text = result.stdout as String;
+  static String _stdoutLine(GuardRunResult result) {
+    final text = utf8.decode(result.stdout);
     return text.endsWith('\n') ? text.substring(0, text.length - 1) : text;
   }
 
-  static void _requireSuccess(ProcessResult result, String message) {
+  static void _requireSuccess(GuardRunResult result, String message) {
     if (result.exitCode == 0) return;
-    final error = (result.stderr as String).trim();
+    final error = result.stderr.trim();
     // Keep error labels bounded even if an external command is very noisy.
     final detail = error.length > 500 ? '${error.substring(0, 500)}…' : error;
     throw IdeProjectToolsException(
@@ -311,7 +314,7 @@ class LocalIdeProjectTools implements IdeProjectTools {
     List<IdeGitChange> changes;
     try {
       changes = parseGitPorcelain(
-        status.stdout as String,
+        utf8.decode(status.stdout),
         maxEntries: maxEntries + 1,
       );
     } on FormatException {

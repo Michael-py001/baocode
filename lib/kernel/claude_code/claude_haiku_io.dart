@@ -16,6 +16,8 @@ import 'claude_core_setting.dart';
 import 'claude_environment.dart';
 import 'claude_haiku.dart';
 import 'claude_settings_file.dart';
+import 'guard_client.dart' show GuardConnection;
+import 'guard_process.dart' show GuardProcess, GuardStdin;
 import 'local_claude_io.dart';
 
 /// `claude -p --model haiku`: the prompt on stdin, one JSON result on
@@ -114,6 +116,94 @@ Future<ClaudeTimedAnswer> timeClaudeAnswer(
   return timer.answer(stderr, code);
 }
 
+/// Starts [executable] through the guard's SEH-protected spawn service when
+/// it is up, else with the plain dart:io Process.start. The guard's child is
+/// wrapped in a [Process] so callers keep their existing Process-typed code
+/// (including STDIN's flush/done and kill signals) unchanged.
+Future<Process> startGuardedProcess(
+  String executable,
+  List<String> arguments, {
+  String? workingDirectory,
+  Map<String, String>? environment,
+  bool includeParentEnvironment = true,
+  bool runInShell = false,
+}) async {
+  final client = GuardConnection.instance;
+  if (client != null && await client.isAvailable()) {
+    try {
+      return _GuardedProcess(
+        await client.startProcess(
+          executable: executable,
+          arguments: arguments,
+          workingDirectory: workingDirectory,
+          environment: environment ?? const {},
+          includeParentEnvironment: includeParentEnvironment,
+          runInShell: runInShell,
+        ),
+      );
+    } on Object {
+      // The guard went away mid-request: fall through to a local start.
+    }
+  }
+  return Process.start(
+    executable,
+    arguments,
+    workingDirectory: workingDirectory,
+    environment: environment,
+    includeParentEnvironment: includeParentEnvironment,
+    runInShell: runInShell,
+  );
+}
+
+/// The guard's [GuardProcess] seen as a dart:io [Process], so existing call
+/// sites need no change. STDIN is a real [IOSink] over the guard's [GuardStdin]
+/// (giving it flush/done); kill ignores the signal, which the guard's spawn
+/// service does not carry across its IPC.
+class _GuardedProcess implements Process {
+  _GuardedProcess(this._process);
+
+  final GuardProcess _process;
+  IOSink? _stdin;
+
+  @override
+  int get pid => _process.pid;
+
+  @override
+  Stream<List<int>> get stdout => _process.stdout;
+
+  @override
+  Stream<List<int>> get stderr => _process.stderr;
+
+  @override
+  Future<int> get exitCode => _process.exitCode;
+
+  @override
+  IOSink get stdin => _stdin ??= IOSink(_GuardedStdin(_process.stdin));
+
+  @override
+  bool kill([ProcessSignal signal = ProcessSignal.sigterm]) {
+    unawaited(_process.kill());
+    return true;
+  }
+}
+
+/// Feeds an [IOSink]'s bytes to the guard's [GuardStdin] over its RPC.
+class _GuardedStdin implements StreamConsumer<List<int>> {
+  _GuardedStdin(this._stdin);
+
+  final GuardStdin _stdin;
+
+  @override
+  Future<void> addStream(Stream<List<int>> stream) async {
+    await for (final chunk in stream) {
+      _stdin.add(chunk);
+    }
+  }
+
+  @override
+  Future<void> close() => _stdin.close();
+}
+
 /// Runs Claude Code, giving each line it prints to [onLine]: what it
 /// wrote to stderr and exited with.
 Future<(String, int)> _run(
@@ -161,7 +251,7 @@ Future<(String, int)> _run(
   final certificates = await nodeCertificatesEnvironment(cli.environment);
   final Process process;
   try {
-    process = await Process.start(
+    process = await startGuardedProcess(
       cli.executable,
       claudeHaikuArguments(
         system,

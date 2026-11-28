@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:path/path.dart' as p;
 
 import '../kernel/claude_code/claude_environment.dart';
+import '../kernel/claude_code/guard_process.dart' show runGuarded;
 import '../window/code_args.dart';
 import 'app_platform.dart';
 import 'shell_command.dart';
@@ -27,15 +28,26 @@ Future<ProcessResult> _runProcess(
   String executable,
   List<String> arguments, {
   Map<String, String>? environment,
-}) => Process.run(
-  executable,
-  arguments,
-  environment: environment,
+}) async {
   // Leniently: not every command says it in UTF-8 (PowerShell's errors,
   // in the system's code page on a Chinese Windows).
-  stdoutEncoding: const Utf8Codec(allowMalformed: true),
-  stderrEncoding: const Utf8Codec(allowMalformed: true),
-);
+  const decoding = Utf8Codec(allowMalformed: true);
+  final result = await runGuarded(
+    executable,
+    arguments,
+    environment: environment,
+    includeParentEnvironment: true,
+    stderrEncoding: decoding,
+    // A script may wait for an administrator's password: give it time.
+    timeout: const Duration(minutes: 2),
+  );
+  return ProcessResult(
+    result.pid,
+    result.exitCode,
+    decoding.decode(result.stdout),
+    result.stderr,
+  );
+}
 
 /// The line a script of ours carries, by which it is told from another
 /// app's `code`.

@@ -10,20 +10,23 @@ import 'dart:typed_data';
 
 import 'guard_protocol.dart';
 
-/// What a process ran to: its exit code, and what it wrote.
-typedef ProcessRun = ({int exitCode, Uint8List stdout, String stderr});
+/// What a process ran to: its exit code, pid, and what it wrote.
+typedef ProcessRun = ({int exitCode, int pid, Uint8List stdout, String stderr});
 
 // Response frame types (spawn_protocol.h).
 const int _stdout = 1;
 const int _stderr = 2;
 const int _exit = 3;
 const int _failed = 4;
+const int _pid = 5;
 
 // Client frames after spawn (stdinMode 1).
 const int _stdinWrite = 1;
 const int _stdinClose = 2;
+const int _kill = 3;
 
 const int _flagRunInShell = 1 << 0;
+const int _flagDetached = 1 << 1;
 
 const int _stdinNone = 0;
 const int _stdinPipe = 1;
@@ -148,39 +151,53 @@ class SpawnClient {
     return (socket: socket, token: address.token);
   }
 
-  /// Runs a process to completion and returns what it wrote and its exit
-  /// code. Past [timeout] the connection is destroyed and the run is reported
-  /// as killed (exit code -1). A `failed` frame throws a [ProcessException].
+  /// Runs a process to completion and returns what it wrote, its pid and its
+  /// exit code. Past [timeout] the connection is destroyed and the run is
+  /// reported as killed (exit code -1). A `failed` frame throws a
+  /// [ProcessException]. [stdoutEncoding] / [stderrEncoding] decode the two
+  /// streams (utf8 with malformed bytes tolerated by default). When
+  /// [includeParentEnvironment] is true the guard's own environment is merged
+  /// in as a base, with [environment] layered on top (this happens in the
+  /// guard process, not the GUI).
   Future<ProcessRun> run({
     required String executable,
     required List<String> arguments,
-    required String workingDirectory,
+    String? workingDirectory,
     Map<String, String> environment = const {},
     bool runInShell = false,
     Uint8List? input,
-    required Duration timeout,
+    Encoding? stdoutEncoding,
+    Encoding? stderrEncoding,
+    Duration timeout = const Duration(seconds: 30),
+    bool includeParentEnvironment = false,
   }) async {
+    final env = _withParent(environment, includeParentEnvironment);
+    final stdoutEncoding_ = stdoutEncoding ?? utf8;
+    final stderrEncoding_ = stderrEncoding ?? utf8;
     if (!Platform.isWindows) {
       return _runLocal(
         executable: executable,
         arguments: arguments,
         workingDirectory: workingDirectory,
-        environment: environment,
+        environment: env,
         runInShell: runInShell,
         input: input,
         timeout: timeout,
+        stdoutEncoding: stdoutEncoding_,
+        stderrEncoding: stderrEncoding_,
       );
     }
     final (socket: socket, token: token) = await _connect();
     final stdout = BytesBuilder(copy: false);
     final stderr = StringBuffer();
     final exit = Completer<int>();
+    int? pidValue;
     final frameReader = _FrameReader(socket, (type, payload) {
       switch (type) {
         case _stdout:
           stdout.add(payload);
         case _stderr:
-          stderr.write(utf8.decode(payload, allowMalformed: true));
+          stderr.write(_decode(stderrEncoding_, payload));
         case _exit:
           if (!exit.isCompleted) {
             exit.complete(
@@ -200,9 +217,10 @@ class SpawnClient {
               ),
             );
           }
-        case 5: // pid frame
+        case _pid:
+          pidValue ??= ByteData.sublistView(payload)
+              .getUint32(0, Endian.little);
         default:
-          // pid and unknown frames carry nothing this call needs.
           break;
       }
     });
@@ -220,13 +238,9 @@ class SpawnClient {
     socket.add(utf8.encode('$token\n'));
     socket.add(
       _requestFrame(
-        commandLine: _commandLine(
-          executable,
-          arguments,
-          runInShell: runInShell,
-        ),
-        workingDirectory: workingDirectory,
-        environment: environment,
+        commandLine: _commandLine(executable, arguments),
+        workingDirectory: workingDirectory ?? '',
+        environment: env,
         stdinMode: input == null ? _stdinNone : _stdinPipe,
         flags: runInShell ? _flagRunInShell : 0,
       ),
@@ -241,7 +255,17 @@ class SpawnClient {
           return -1;
         },
       );
-      return (exitCode: code, stdout: stdout.takeBytes(), stderr: '$stderr');
+      final raw = stdout.takeBytes();
+      final decoded = _decode(stdoutEncoding_, raw);
+      final out = stdoutEncoding_ == utf8
+          ? raw
+          : Uint8List.fromList(utf8.encode(decoded));
+      return (
+        exitCode: code,
+        pid: pidValue ?? -1,
+        stdout: out,
+        stderr: '$stderr',
+      );
     } finally {
       await frameReader.close();
       socket.destroy();
@@ -254,16 +278,18 @@ class SpawnClient {
   Future<SpawnedProcess> start({
     required String executable,
     required List<String> arguments,
-    required String workingDirectory,
+    String? workingDirectory,
     Map<String, String> environment = const {},
     bool runInShell = false,
+    bool includeParentEnvironment = false,
   }) async {
+    final env = _withParent(environment, includeParentEnvironment);
     if (!Platform.isWindows) {
       final process = await Process.start(
         executable,
         arguments,
         workingDirectory: workingDirectory,
-        environment: environment,
+        environment: env,
         runInShell: runInShell,
       );
       return SpawnedProcess._local(process);
@@ -272,6 +298,8 @@ class SpawnClient {
     final stdout = StreamController<Uint8List>.broadcast();
     final stderr = StreamController<Uint8List>.broadcast();
     final exit = Completer<int>();
+    final pid = Completer<int>();
+    final pidValue = _PidValue();
     final frameReader = _FrameReader(socket, (type, payload) {
       switch (type) {
         case _stdout:
@@ -296,8 +324,15 @@ class SpawnClient {
           if (!exit.isCompleted) exit.completeError(failure);
           stdout.addError(failure);
           stderr.addError(failure);
+        case _pid:
+          if (!pid.isCompleted) {
+            pid.complete(
+              ByteData.sublistView(payload).getUint32(0, Endian.little),
+            );
+          }
+          pidValue.value = ByteData.sublistView(payload)
+              .getUint32(0, Endian.little);
         default:
-          // pid: nothing to expose here.
           break;
       }
     });
@@ -321,27 +356,93 @@ class SpawnClient {
     socket.add(utf8.encode('$token\n'));
     socket.add(
       _requestFrame(
-        commandLine: _commandLine(
-          executable,
-          arguments,
-          runInShell: runInShell,
-        ),
-        workingDirectory: workingDirectory,
-        environment: environment,
+        commandLine: _commandLine(executable, arguments),
+        workingDirectory: workingDirectory ?? '',
+        environment: env,
         stdinMode: _stdinPipe,
         flags: runInShell ? _flagRunInShell : 0,
       ),
+    );
+    final stdin = IOSink(
+      _StdinConsumer((data, {close = false}) {
+        if (data.isNotEmpty || close) _writeStdin(socket, data, close: close);
+      }),
     );
     return SpawnedProcess._(
       stdout.stream,
       stderr.stream,
       exit.future,
-      (data) => _writeStdin(socket, data),
+      stdin,
       () {
-        _writeStdin(socket, Uint8List(0), close: true);
-        unawaited(socket.close());
+        if (pid.isCompleted) {
+          _writeControlFrame(socket, _kill);
+        }
       },
+      () async =>
+          pid.future.timeout(const Duration(seconds: 5), onTimeout: () => -1),
+      pidValue,
     );
+  }
+
+  /// Starts a detached process through the service and returns its pid. The
+  /// service does not wait for the child; the connection is closed as soon as
+  /// the pid frame arrives. Returns -1 if no pid arrives within five seconds.
+  Future<int> spawnDetached({
+    required String executable,
+    required List<String> arguments,
+    String? workingDirectory,
+    Map<String, String> environment = const {},
+    bool runInShell = false,
+    bool includeParentEnvironment = false,
+  }) async {
+    final env = _withParent(environment, includeParentEnvironment);
+    if (!Platform.isWindows) {
+      final process = await Process.start(
+        executable,
+        arguments,
+        workingDirectory: workingDirectory,
+        environment: env,
+        runInShell: runInShell,
+        mode: ProcessStartMode.detached,
+      );
+      return process.pid;
+    }
+    final (socket: socket, token: token) = await _connect();
+    final pid = Completer<int>();
+    final frameReader = _FrameReader(socket, (type, payload) {
+      if (type == _pid && !pid.isCompleted) {
+        pid.complete(ByteData.sublistView(payload).getUint32(0, Endian.little));
+      }
+    });
+    unawaited(
+      frameReader.done.then(
+        (_) {
+          if (!pid.isCompleted) pid.complete(-1);
+        },
+        onError: (Object error, StackTrace stack) {
+          if (!pid.isCompleted) pid.completeError(error, stack);
+        },
+      ),
+    );
+    try {
+      socket.add(utf8.encode('$token\n'));
+      socket.add(
+        _requestFrame(
+          commandLine: _commandLine(executable, arguments),
+          workingDirectory: workingDirectory ?? '',
+          environment: env,
+          stdinMode: _stdinNone,
+          flags: _flagDetached | (runInShell ? _flagRunInShell : 0),
+        ),
+      );
+      return await pid.future.timeout(
+        const Duration(seconds: 5),
+        onTimeout: () => -1,
+      );
+    } finally {
+      await frameReader.close();
+      socket.destroy();
+    }
   }
 
   void _writeStdin(Socket socket, Uint8List data, {bool close = false}) {
@@ -356,6 +457,60 @@ class SpawnClient {
     }
     socket.add(frame.takeBytes());
   }
+
+  void _writeControlFrame(Socket socket, int type) {
+    final frame = BytesBuilder(copy: false)
+      ..add(_u32(type))
+      ..add(_u32(0));
+    socket.add(frame.takeBytes());
+  }
+}
+
+/// A mutable pid holder so [SpawnedProcess.pid] reflects a pid frame that
+/// arrives after the process object was created.
+class _PidValue {
+  int? value;
+}
+
+/// Instance form of the port probe. A Dart class cannot declare a static and
+/// instance member with the same name, so the instance form lives in an
+/// extension while [SpawnClient.isAvailable] stays for existing callers.
+extension SpawnClientAvailability on SpawnClient {
+  /// Checks this client's [dataDir] address file and that its port is listening.
+  Future<bool> isAvailable() => SpawnClient.isAvailable(dataDir);
+}
+
+/// Merges the guard's own environment in as a base when [include] is true,
+/// then layers [environment] on top. An empty result still means "inherit".
+Map<String, String> _withParent(
+  Map<String, String> environment,
+  bool include,
+) => include ? {...Platform.environment, ...environment} : environment;
+
+/// Decodes one chunk. The default utf8 tolerates malformed bytes, matching
+/// Process's own stream decoding; a caller-supplied encoding is used as-is.
+String _decode(Encoding encoding, List<int> bytes) => encoding == utf8
+    ? utf8.decode(bytes, allowMalformed: true)
+    : encoding.decode(bytes);
+
+/// StreamConsumer used by the stdin [IOSink]: forwards written bytes as stdin
+/// frames and sends a close frame (plus a zero-length write) when closed.
+class _StdinConsumer implements StreamConsumer<List<int>> {
+  _StdinConsumer(this._write);
+
+  final void Function(Uint8List data, {bool close}) _write;
+
+  @override
+  Future addStream(Stream<List<int>> stream) async {
+    await for (final chunk in stream) {
+      _write(Uint8List.fromList(chunk));
+    }
+  }
+
+  @override
+  Future close() async {
+    _write(Uint8List(0), close: true);
+  }
 }
 
 /// A process started with [SpawnClient.start], with its stdio still open.
@@ -365,31 +520,53 @@ final class SpawnedProcess {
     this.stdout,
     this.stderr,
     this.exitCode,
-    void Function(Uint8List) write,
-    void Function() close,
-  ) : _write = write,
-      _close = close;
+    this.stdin,
+    void Function() kill,
+    this._pid,
+    this._pidValue,
+  ) : _kill = kill;
 
   SpawnedProcess._local(Process process)
     : this._(
         process.stdout.map((bytes) => Uint8List.fromList(bytes)),
         process.stderr.map((bytes) => Uint8List.fromList(bytes)),
         process.exitCode,
-        (data) => process.stdin.add(data),
-        () => unawaited(process.stdin.close().catchError((Object _) {})),
+        process.stdin,
+        () {
+          process.kill(ProcessSignal.sigkill);
+        },
+        () async => process.pid,
+        _PidValue()..value = process.pid,
       );
 
   final Stream<Uint8List> stdout;
   final Stream<Uint8List> stderr;
   final Future<int> exitCode;
-  final void Function(Uint8List) _write;
-  final void Function() _close;
+  final IOSink stdin;
+  final Future<int> Function() _pid;
+  final _PidValue _pidValue;
+  final void Function() _kill;
 
-  /// Writes bytes to the child's stdin.
-  void write(Uint8List data) => _write(data);
+  /// The child's process id, or -1 before the pid frame arrives.
+  int get pid => _pidValue.value ?? -1;
 
-  /// Closes the child's stdin.
-  void close() => _close();
+  /// Completes with the real pid once the pid frame arrives (or the local
+  /// process's pid). Use this when the pid is needed before responding OK.
+  Future<int> pidReady() => _pid();
+
+  /// Sends a kill control frame to the service; true once one was sent.
+  Future<bool> kill() async {
+    final target = await _pid();
+    if (target <= 0) return false;
+    _kill();
+    return true;
+  }
+
+  /// Writes bytes to the child's stdin (kept for compatibility; prefer [stdin]).
+  void write(Uint8List data) => stdin.add(data);
+
+  /// Closes the child's stdin (kept for compatibility; prefer [stdin]).
+  void close() => unawaited(stdin.close());
 }
 
 Uint8List _u32(int value) {
@@ -475,13 +652,9 @@ String _quoteArgument(String argument) {
   return '$buffer';
 }
 
-String _commandLine(
-  String executable,
-  List<String> arguments, {
-  required bool runInShell,
-}) => [
-  if (runInShell) 'cmd.exe',
-  if (runInShell) '/c',
+/// The shell prefix (`cmd.exe /c`) is added by the service from the
+/// runInShell flag; sending it here as well would double-prefix the command.
+String _commandLine(String executable, List<String> arguments) => [
   _quoteArgument(executable),
   for (final argument in arguments) _quoteArgument(argument),
 ].join(' ');
@@ -489,11 +662,13 @@ String _commandLine(
 Future<ProcessRun> _runLocal({
   required String executable,
   required List<String> arguments,
-  required String workingDirectory,
+  String? workingDirectory,
   required Map<String, String> environment,
   required bool runInShell,
   Uint8List? input,
   required Duration timeout,
+  required Encoding stdoutEncoding,
+  required Encoding stderrEncoding,
 }) async {
   final process = await Process.start(
     executable,
@@ -507,7 +682,11 @@ Future<ProcessRun> _runLocal({
   final reading = Future.wait([
     process.stdout.listen(stdout.add).asFuture<void>(),
     process.stderr
-        .transform(const Utf8Decoder(allowMalformed: true))
+        .transform(
+          stderrEncoding == utf8
+              ? const Utf8Decoder(allowMalformed: true)
+              : stderrEncoding.decoder,
+        )
         .listen(stderr.write)
         .asFuture<void>(),
   ]);
@@ -522,7 +701,12 @@ Future<ProcessRun> _runLocal({
     },
   );
   await reading;
-  return (exitCode: code, stdout: stdout.takeBytes(), stderr: '$stderr');
+  final raw = stdout.takeBytes();
+  final decoded = _decode(stdoutEncoding, raw);
+  final out = stdoutEncoding == utf8
+      ? raw
+      : Uint8List.fromList(utf8.encode(decoded));
+  return (exitCode: code, pid: process.pid, stdout: out, stderr: '$stderr');
 }
 
 /// Starts baocode-spawn.exe as a detached service at [dataDir] and writes the

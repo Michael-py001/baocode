@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path/path.dart' as p;
 
 import '../../kernel/claude_code/claude_environment.dart';
+import '../../kernel/claude_code/claude_haiku_io.dart' show startGuardedProcess;
 import '../../platform/data_dir.dart';
 import '../../platform/child_process_registry.dart';
 import 'lsp_process.dart';
@@ -115,7 +116,7 @@ abstract final class LspProcesses {
     };
     final executable = launch.executable;
     try {
-      final process = await Process.start(
+      final process = await startGuardedProcess(
         executable,
         launch.arguments,
         workingDirectory: launch.workingDirectory,

@@ -262,6 +262,7 @@ DWORD WINAPI pipe_reader(LPVOID param) {
 struct StdinCtx {
   SOCKET sock;
   HANDLE pipe;
+  HANDLE process;  // for the type 3 kill control frame
 };
 
 DWORD WINAPI stdin_pump(LPVOID param) {
@@ -274,6 +275,11 @@ DWORD WINAPI stdin_pump(LPVOID param) {
       break;
     }
     if (type == spawn_proto::kStdinClose) break;
+    if (type == spawn_proto::kKill) {
+      // Zero-length control frame: terminate the child and end the wait.
+      ::TerminateProcess(ctx->process, 1);
+      break;
+    }
     if (type != spawn_proto::kStdinWrite) break;
     char buf[kReadChunk];
     uint32_t left = len;
@@ -384,22 +390,37 @@ void serve_connection(SOCKET rawSocket) {
     inRead.reset(raw);
     inWrite.reset(write);
   }
-  // Only the child-facing ends stay inheritable.
-  ::SetHandleInformation(outRead.get(), HANDLE_FLAG_INHERIT, 0);
-  ::SetHandleInformation(errRead.get(), HANDLE_FLAG_INHERIT, 0);
-  if (inWrite.get() != nullptr) {
-    ::SetHandleInformation(inWrite.get(), HANDLE_FLAG_INHERIT, 0);
+  // Detached children outlive this connection: no pipe inheritance and no
+  // wait. They are not given our stdio handles, so no reader threads run.
+  const bool detached = (flags & spawn_proto::kFlagDetached) != 0;
+  if (detached) {
+    // bInheritHandles is TRUE below; strip every pipe end so the detached child
+    // cannot keep this connection's pipes open after we return.
+    ::SetHandleInformation(outRead.get(), HANDLE_FLAG_INHERIT, 0);
+    ::SetHandleInformation(outWrite.get(), HANDLE_FLAG_INHERIT, 0);
+    ::SetHandleInformation(errRead.get(), HANDLE_FLAG_INHERIT, 0);
+    ::SetHandleInformation(errWrite.get(), HANDLE_FLAG_INHERIT, 0);
+    if (inRead.get() != nullptr) ::SetHandleInformation(inRead.get(), HANDLE_FLAG_INHERIT, 0);
+    if (inWrite.get() != nullptr) ::SetHandleInformation(inWrite.get(), HANDLE_FLAG_INHERIT, 0);
+  } else {
+    // Only the child-facing ends stay inheritable.
+    ::SetHandleInformation(outRead.get(), HANDLE_FLAG_INHERIT, 0);
+    ::SetHandleInformation(errRead.get(), HANDLE_FLAG_INHERIT, 0);
+    if (inWrite.get() != nullptr) {
+      ::SetHandleInformation(inWrite.get(), HANDLE_FLAG_INHERIT, 0);
+    }
   }
-
   STARTUPINFOW si{};
   si.cb = sizeof(si);
-  si.dwFlags = STARTF_USESTDHANDLES;
-  si.hStdOutput = outWrite.get();
-  si.hStdError = errWrite.get();
-  si.hStdInput = inRead.get();
+  if (!detached) {
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = outWrite.get();
+    si.hStdError = errWrite.get();
+    si.hStdInput = inRead.get();
+  }
   PROCESS_INFORMATION pi{};
   DWORD creationFlags = 0;
-  if ((flags & spawn_proto::kFlagDetached) != 0) {
+  if (detached) {
     creationFlags |= DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
   }
 
@@ -427,6 +448,13 @@ void serve_connection(SOCKET rawSocket) {
   send_u32_frame(sock.get(), sendLock.ptr(), spawn_proto::kPid,
                  static_cast<uint32_t>(pi.dwProcessId));
 
+  if (detached) {
+    // The client expects only the pid frame, then disconnects. Do not wait on
+    // the child: a detached process is meant to outlive this connection, and
+    // a client disconnect here is normal (do not kill the child).
+    return;
+  }
+
   ScopedHandle outThread;
   ScopedHandle errThread;
   ScopedHandle inThread;
@@ -447,7 +475,7 @@ void serve_connection(SOCKET rawSocket) {
     delete errCtx;
   }
   if (stdinMode == spawn_proto::kStdinPipe) {
-    StdinCtx* stdinCtx = new StdinCtx{sock.get(), inWrite.release()};
+    StdinCtx* stdinCtx = new StdinCtx{sock.get(), inWrite.release(), process.get()};
     created = ::CreateThread(nullptr, 0, stdin_pump, stdinCtx, 0, nullptr);
     if (created != nullptr) {
       inThread.reset(created);

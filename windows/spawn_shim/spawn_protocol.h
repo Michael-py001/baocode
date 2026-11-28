@@ -24,7 +24,11 @@
 //
 // Client frames after spawn (client -> server), for stdinMode 1:
 //
-//   [u32 type][u32 length][bytes]   type 1 = stdin bytes, type 2 = close stdin
+//   [u32 type][u32 length][bytes]
+//     type 1 = stdin bytes, type 2 = close stdin, type 3 = kill child.
+//   type 3 is a zero-length control frame; the server TerminateProcesses the
+//   child and ends its wait. It shares the number 3 with the server->client
+//   exit frame but is not related (different direction).
 //
 // The server reads stdout/stderr on anonymous pipes with ReadFile and writes
 // frames as bytes arrive; every CreateProcessW goes through spawn_seh so an
@@ -42,6 +46,7 @@ constexpr unsigned char kPid = 5;
 
 constexpr unsigned char kStdinWrite = 1;
 constexpr unsigned char kStdinClose = 2;
+constexpr unsigned char kKill = 3;  // client -> server: terminate the child
 
 constexpr unsigned int kFlagRunInShell = 1u << 0;
 constexpr unsigned int kFlagDetached = 1u << 1;

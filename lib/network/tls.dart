@@ -9,6 +9,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
+import '../kernel/claude_code/guard_process.dart' show runGuarded;
 import '../platform/data_dir.dart';
 
 /// What [error] was: Dart's own message says only that the handshake
@@ -112,13 +113,13 @@ Future<String> _windowsCertificates() async {
       r'ForEach-Object { "-----BEGIN CERTIFICATE-----"; '
       r'[Convert]::ToBase64String($_.RawData, "InsertLineBreaks"); '
       r'"-----END CERTIFICATE-----" }';
-  final result = await Process.run('powershell.exe', [
+  final result = await runGuarded('powershell.exe', [
     '-NoProfile',
     '-NonInteractive',
     '-Command',
     script,
-  ]).timeout(const Duration(seconds: 10));
-  return result.exitCode == 0 ? '${result.stdout}' : '';
+  ], timeout: const Duration(seconds: 10));
+  return result.exitCode == 0 ? utf8.decode(result.stdout) : '';
 }
 
 /// The system's bundle on Linux (Debian's and Red Hat's places for it,

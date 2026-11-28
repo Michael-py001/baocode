@@ -15,7 +15,8 @@ import 'guard_ipc.dart';
 import 'guard_protocol.dart';
 import 'guard_registry.dart';
 import 'guard_session.dart';
-import 'guard_spawn_client.dart' show SpawnClient, startSpawnService;
+import 'guard_spawn_client.dart'
+    show SpawnClient, SpawnedProcess, startSpawnService;
 
 class GuardDaemon {
   GuardDaemon({
@@ -37,6 +38,7 @@ class GuardDaemon {
   late final RpcPeer peer = RpcPeer(channel.messages, channel.send);
 
   final Map<String, GuardSession> _sessions = {};
+  final Map<String, SpawnedProcess> _processes = {};
   GuardListener? _listener;
   Timer? _graceTimer;
   bool _closed = false;
@@ -199,17 +201,88 @@ class GuardDaemon {
       final run = await spawn.run(
         executable: '${map['executable']}',
         arguments: _texts(map['arguments']),
-        workingDirectory: '${map['workingDirectory']}',
+        workingDirectory: map['workingDirectory'] as String?,
         environment: _strings(map['environment']),
         runInShell: map['runInShell'] == true,
+        includeParentEnvironment: map['includeParentEnvironment'] == true,
         input: _bytes(map['input']),
         timeout: Duration(milliseconds: _int(map['timeoutMs']) ?? 30000),
       );
       return {
         'exitCode': run.exitCode,
+        'pid': run.pid,
         'stdout': base64Encode(run.stdout),
         'stderr': run.stderr,
       };
+    };
+
+    peer.handlers[GuardProtocol.processStart] = (params, call) async {
+      final map = _asMap(params);
+      final id = '${map['id']}';
+      final process = await spawn.start(
+        executable: '${map['executable']}',
+        arguments: _texts(map['arguments']),
+        workingDirectory: map['workingDirectory'] as String?,
+        environment: _strings(map['environment']),
+        runInShell: map['runInShell'] == true,
+        includeParentEnvironment: map['includeParentEnvironment'] == true,
+      );
+      final previous = _processes.remove(id);
+      unawaited(previous?.kill());
+      _processes[id] = process;
+      // Feed the app's stdout/stderr notifications as raw bytes.
+      process.stdout.listen((bytes) {
+        peer.notify(GuardProtocol.processOutput, {
+          'id': id,
+          'stdout': base64Encode(bytes),
+          'stderr': '',
+        });
+      });
+      process.stderr.listen((bytes) {
+        peer.notify(GuardProtocol.processOutput, {
+          'id': id,
+          'stdout': '',
+          'stderr': base64Encode(bytes),
+        });
+      });
+      unawaited(
+        process.exitCode.then((code) {
+          _processes.remove(id);
+          peer.notify(GuardProtocol.processExit, {'id': id, 'exitCode': code});
+        }),
+      );
+      // The pid frame may still be in flight; wait for it so the app gets a
+      // real pid rather than -1.
+      return {'ok': true, 'pid': await process.pidReady()};
+    };
+
+    peer.handlers[GuardProtocol.processStdin] = (params, call) async {
+      final map = _asMap(params);
+      final process = _processes['${map['id']}'];
+      final data = _bytes(map['data']);
+      if (process != null && data != null) process.stdin.add(data);
+      if (map['close'] == true) unawaited(process?.stdin.close());
+      return {'ok': process != null};
+    };
+
+    peer.handlers[GuardProtocol.processKill] = (params, call) async {
+      final map = _asMap(params);
+      final process = _processes.remove('${map['id']}');
+      final ok = process == null ? false : await process.kill();
+      return {'ok': ok};
+    };
+
+    peer.handlers[GuardProtocol.processDetached] = (params, call) async {
+      final map = _asMap(params);
+      final pid = await spawn.spawnDetached(
+        executable: '${map['executable']}',
+        arguments: _texts(map['arguments']),
+        workingDirectory: map['workingDirectory'] as String?,
+        environment: _strings(map['environment']),
+        runInShell: map['runInShell'] == true,
+        includeParentEnvironment: map['includeParentEnvironment'] == true,
+      );
+      return {'pid': pid};
     };
   }
 

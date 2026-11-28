@@ -36,11 +36,13 @@ void main() async {
   late Directory dataDir;
   late ServerSocket server;
   late Completer<Uint8List> requests;
+  late Completer<Uint8List> clientFrames;
   final token = 'tok-${DateTime.now().microsecondsSinceEpoch}';
 
   Future<void> setUp() async {
     dataDir = await Directory.systemTemp.createTemp('spawn-client-test');
     requests = Completer<Uint8List>();
+    clientFrames = Completer<Uint8List>();
     server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
     final file = File(GuardAddress.spawnPortPath(dataDir.path));
     await file.parent.create(recursive: true);
@@ -99,6 +101,75 @@ void main() async {
           return;
         }
       }
+    });
+  }
+
+  /// Keeps the connection open after the request frame and captures all
+  /// subsequent client frames (stdin writes / kill control) for assertions.
+  void serveInteractive(List<(int, List<int>)> out) {
+    server.listen((socket) async {
+      final buffered = BytesBuilder(copy: false);
+      var tokenRead = false;
+      var requestDone = false;
+      final captured = BytesBuilder(copy: false);
+      await for (final chunk in socket) {
+        buffered.add(chunk);
+        while (true) {
+          final all = buffered.takeBytes();
+          var offset = 0;
+          if (!tokenRead) {
+            final newline = all.indexOf(0x0A);
+            if (newline < 0) {
+              buffered.add(all);
+              break;
+            }
+            tokenRead = true;
+            offset = newline + 1;
+          }
+          if (!requestDone) {
+            if (all.length - offset < 20) {
+              buffered.add(Uint8List.sublistView(all, offset));
+              break;
+            }
+            final cmdBytes = u32(all, offset);
+            final cwdBytes = u32(all, offset + 4);
+            final envBytes = u32(all, offset + 8);
+            final length = 20 + cmdBytes + cwdBytes + envBytes;
+            if (all.length - offset < length) {
+              buffered.add(Uint8List.sublistView(all, offset));
+              break;
+            }
+            requests.complete(
+              Uint8List.sublistView(all, offset, offset + length),
+            );
+            offset += length;
+            requestDone = true;
+            for (final (type, bytes) in out) {
+              socket.add(frameOf(type, bytes));
+            }
+          }
+          if (offset < all.length)
+            captured.add(Uint8List.sublistView(all, offset));
+          // The kill control frame is the last thing the test sends.
+          if (!clientFrames.isCompleted && captured.length >= 8) {
+            final snapshot = Uint8List.fromList(captured.takeBytes());
+            captured.add(snapshot);
+            var p = 0;
+            var sawKill = false;
+            while (p + 8 <= snapshot.length) {
+              if (u32(snapshot, p) == 3 && u32(snapshot, p + 4) == 0) {
+                sawKill = true;
+                break;
+              }
+              p += 8 + u32(snapshot, p + 4);
+            }
+            if (sawKill) clientFrames.complete(snapshot);
+          }
+          break;
+        }
+      }
+      if (!clientFrames.isCompleted)
+        clientFrames.complete(captured.takeBytes());
     });
   }
 
@@ -190,12 +261,12 @@ void main() async {
     await tearDown();
   });
 
-  await test('runInShell and input set flags and stdinMode', () async {
+  await test('runInShell sets only the flag; no cmd.exe prefix', () async {
     await setUp();
     serveOnce([(3, int32(0))]);
     await SpawnClient(dataDir.path).run(
       executable: 'a.exe',
-      arguments: const [],
+      arguments: ['x y'],
       workingDirectory: 'C:\\',
       runInShell: true,
       input: Uint8List.fromList(utf8.encode('hi')),
@@ -204,16 +275,91 @@ void main() async {
     final frame = await requests.future;
     check(u32(frame, 12) == 1, 'flag runInShell');
     check(u32(frame, 16) == 1, 'stdinMode pipe');
+    final cmdBytes = u32(frame, 0);
+    final commandLine = utf16(Uint8List.sublistView(frame, 20, 20 + cmdBytes));
+    check(
+      commandLine == 'a.exe "x y"',
+      'no double cmd.exe prefix: $commandLine',
+    );
     await tearDown();
   });
 
-  await test('isAvailable checks the port is listening', () async {
+  await test('run returns the pid from the pid frame', () async {
     await setUp();
-    check(await SpawnClient.isAvailable(dataDir.path), 'available');
-    await server.close();
-    check(!await SpawnClient.isAvailable(dataDir.path), 'not available');
-    if (dataDir.existsSync()) dataDir.deleteSync(recursive: true);
+    serveOnce([(5, int32(4321)), (3, int32(0))]);
+    final run = await SpawnClient(dataDir.path).run(
+      executable: 'a.exe',
+      arguments: const [],
+      workingDirectory: 'C:\\',
+      timeout: const Duration(seconds: 5),
+    );
+    check(run.pid == 4321, 'pid 4321, got ${run.pid}');
+    check(run.exitCode == 0, 'exit 0');
+    await tearDown();
   });
+
+  await test(
+    'start exposes pidReady and stdin IOSink; kill sends type 3',
+    () async {
+      await setUp();
+      serveInteractive([(5, int32(777))]);
+      final proc = await SpawnClient(dataDir.path).start(
+        executable: 'a.exe',
+        arguments: const [],
+        workingDirectory: 'C:\\',
+      );
+      check(await proc.pidReady() == 777, 'pidReady 777');
+      check(proc.pid == 777, 'pid getter 777');
+      proc.stdin.writeln('hi');
+      await proc.stdin.flush();
+      check(await proc.kill(), 'kill returns true');
+      // Give the server a moment to receive the stdin + kill frames.
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      final frames = await clientFrames.future;
+      var sawWrite = false;
+      var sawKill = false;
+      var offset = 0;
+      while (offset + 8 <= frames.length) {
+        final type = u32(frames, offset);
+        final length = u32(frames, offset + 4);
+        if (type == 1) sawWrite = true;
+        if (type == 3 && length == 0) sawKill = true;
+        offset += 8 + length;
+      }
+      check(sawWrite, 'stdin write frame');
+      check(sawKill, 'kill control frame type 3');
+      await tearDown();
+    },
+  );
+
+  await test('spawnDetached sets detached flag and returns pid', () async {
+    await setUp();
+    serveOnce([(5, int32(999))]);
+    final pid = await SpawnClient(dataDir.path).spawnDetached(
+      executable: 'a.exe',
+      arguments: const [],
+      workingDirectory: 'C:\\',
+    );
+    check(pid == 999, 'detached pid 999, got $pid');
+    final frame = await requests.future;
+    check((u32(frame, 12) & 2) != 0, 'flag detached');
+    await tearDown();
+  });
+
+  await test(
+    'isAvailable checks the port is listening (static + instance)',
+    () async {
+      await setUp();
+      check(await SpawnClient.isAvailable(dataDir.path), 'static available');
+      check(
+        await SpawnClient(dataDir.path).isAvailable(),
+        'instance available',
+      );
+      await server.close();
+      check(!await SpawnClient.isAvailable(dataDir.path), 'not available');
+      if (dataDir.existsSync()) dataDir.deleteSync(recursive: true);
+    },
+  );
 
   if (failures > 0) {
     throw StateError('$failures test(s) failed');

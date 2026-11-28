@@ -7,3 +7,5 @@ export 'protocol.dart';
 export 'src/guard/guard_protocol.dart';
 export 'src/guard/guard_registry.dart';
 export 'src/guard/guard_ipc.dart' show GuardListener, AlreadyServing;
+export 'src/guard/guard_spawn_client.dart'
+    show SpawnClient, SpawnedProcess, ProcessRun, startSpawnService;

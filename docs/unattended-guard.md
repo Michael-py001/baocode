@@ -46,8 +46,9 @@ BaoCode GUI ──IPC──> bao-guard.exe ──RPC over socket──> baocode-
 
 - 只防住 `CreateProcessW` 调用栈里的 C++ 异常（本案 7/9 次）。UniAccess 在 Dart VM 线程 / 目录快照等其他路径抛的异常（2/9 次）不在覆盖内，靠 guard 自动重启兜底。
 - 崩溃点若正处于模型生成中途，那半句输出无法恢复（会话 JSONL 按完整块 flush）；已发出但无结果的工具调用按合成错误处理，副作用可能重复。
-- ConPTY 终端仍在 guard 进程里用 `bao_conpty`（其 `CreateProcessW` 是 FFI 直调，未接 SEH）；终端路径若触发注入异常，guard 会崩并重启，由重连兜底。
-- GUI 侧其余 `Process.start` 调用点（git 状态、LSP、MCP、debug adapter、更新器等）尚未逐一切换到 spawn 服务；客户端已备好，迁移是后续工作。
+- ConPTY 终端：GUI 进程内的 `CreateProcessW` 改为经 `baocode_spawn.dll` 的 `spawn_seh`（可选加载，DLL 缺失时回退原调用），注入异常被 `__except` 接住、终端启动失败而非 GUI 崩溃。`windows/runner/window_channel.cpp` 的 open editor 同样改走 `spawn_seh`。
+- GUI 侧主要进程创建点已切到 guard 的 spawn RPC（经 C++ 服务）：Claude CLI、Haiku、LSP、MCP probe、DAP、local_run、git 状态/remote、powershell 证书、shell 命令、更新器（含 detached）等；guard 不可用时一律回退原 `dart:io`，保证功能可用。
+- 残留的裸调用：`Process.runSync` 两处（apiKeyHelper、同步文件索引）无法改异步，按约定保持本地；原生 runner 的 `StartGuard()` 本身已 SEH 保护。`packages/bao_agent` 的 6 处子进程在内置核心路径下跑在 guard 进程内，CLI/Haiku/DartCore 回退路径已由 GUI 侧 seam 覆盖。
 - 本改动较大，先在 fork 自用，后续 upstream 需拆分。
 
 ## 根治

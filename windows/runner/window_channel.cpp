@@ -18,6 +18,8 @@
 #include <utility>
 #include <vector>
 
+#include "../spawn_shim/spawn_shim.h"
+
 #include "clipboard_images.h"
 #include "context_menu.h"
 #include "drag_source.h"
@@ -297,12 +299,16 @@ bool StartWithoutConsole(const std::wstring& path,
   STARTUPINFOW startup = {};
   startup.cb = sizeof(startup);
   PROCESS_INFORMATION process = {};
-  if (!::CreateProcessW(application.empty() ? nullptr : application.c_str(),
-                        command_line.data(), nullptr, nullptr, FALSE,
-                        CREATE_NO_WINDOW, nullptr, nullptr, &startup,
-                        &process)) {
-    return false;
-  }
+  // CreateProcessW may modify its command line buffer; the shim takes a
+  // mutable one, and catches a C++ exception an injected DLL throws from
+  // inside the hooked syscall instead of aborting the GUI (issue #1).
+  std::vector<wchar_t> mutable_command(command_line.begin(), command_line.end());
+  mutable_command.push_back(L'\0');
+  const DWORD error = spawn_seh(
+      application.empty() ? nullptr : application.c_str(),
+      mutable_command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+      nullptr, nullptr, &startup, sizeof(startup), nullptr, &process);
+  if (error != 0) return false;
   ::CloseHandle(process.hThread);
   ::CloseHandle(process.hProcess);
   return true;
